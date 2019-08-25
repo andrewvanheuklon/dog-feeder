@@ -1,11 +1,13 @@
+#include <StringSplitter.h>
 #include <Servo.h>
 #include <AccelStepper.h>
+#include "HX711.h"
 
 const int TRAY_SWITCH = 45;
 const int INPUT_BUTTON = 5;
 
-const int VIBRATE_MOSFET = 4;
-const int VIBRATE_MS = 2000;
+const int VIBRATE_RELAY = 14;
+const int VIBRATE_MS = 1000;
 
 const int BOWL_STEPPER_STEP = 36;
 const int BOWL_STEPPER_DIRECTION = 37;
@@ -14,12 +16,15 @@ const int BOWL_STEPPER_SLEEP = 35;
 const int HOPPER_STEPPER_STEP = 52;
 const int HOPPER_STEPPER_DIRECTION = 53;
 const int HOPPER_STEPPER_SLEEP = 51;
-const int HOPPER_SPEED = 400;
+const int HOPPER_SPEED = 15000;
 // others
 
 const int DOOR_SERVO = 6;
-const int DOOR_OPENED = 0;
+const int DOOR_OPENED = 2;
 const int DOOR_CLOSED = 104;
+const int DOOR_DELAY_STEP = 1;
+const float DOOR_ACCEL_AMOUNT = .0009;
+const float DOOR_START_DP = .00001;
 
 const int STEPPER_SPEED_OUT = 15000;
 const int STEPPER_ACCEL_OUT = 5000;
@@ -31,14 +36,27 @@ const int OUT_POS = -6900;
 const int IN_POS = -30;
 const int CENTERED_POS = -300;
 
-const int RED = 11;
-const int BLUE = 10;
-const int GREEN = 12;
+const int RED = 10;
+const int BLUE = 12;
+const int GREEN = 11;
+const int WHITE = 99;
+
+int redValue = 0;
+int blueValue = 0;
+int greenValue = 0;
 
 const int MOTION_SENSOR = 17;
 
+const int HX711_DT = 29;
+const int HX711_SK = 28;
+float calibrationFactor = -1950;
+HX711 scale;
+
+String command = "";
+
 Servo doorServo;
 boolean isDoorOpen = false;
+boolean isBowlOut = false;
 
 AccelStepper stepper(AccelStepper::DRIVER, BOWL_STEPPER_STEP, BOWL_STEPPER_DIRECTION);
 AccelStepper hopper(AccelStepper::DRIVER, HOPPER_STEPPER_STEP, HOPPER_STEPPER_DIRECTION);
@@ -47,14 +65,16 @@ int pos = 200;
 
 void setup() {
   Serial.begin(9600);
+
   //BOWL STEPPER
   stepper.setMaxSpeed(8000);
   stepper.setAcceleration(3000);
   stepper.setEnablePin(BOWL_STEPPER_SLEEP);
   stepper.disableOutputs();
 
+  //HOPPER
   hopper.setMaxSpeed(HOPPER_SPEED);
-  hopper.setAcceleration(1000);
+  hopper.setAcceleration(10000);
   hopper.setEnablePin(HOPPER_STEPPER_SLEEP);
   hopper.disableOutputs();
 
@@ -68,24 +88,66 @@ void setup() {
   pinMode(GREEN, OUTPUT);
 
   pinMode(MOTION_SENSOR, INPUT);
+  pinMode(VIBRATE_RELAY, OUTPUT);
 
-  //testHopper();
+  delay(1000);
+  scale.begin(HX711_DT, HX711_SK);
+  scale.set_scale();
+  scale.tare();
+  scale.set_scale(calibrationFactor);
 
-  //calibratePosition();
-  //testColors();
+  initPositions();
+
   //testMotionSensor();
-  //vibrate();
-  //closeDoor();
-  //delay(2000);
+}
+
+void initPositions() {
+  calibratePosition();
+  bowlIn();
+
+  doorServo.attach(DOOR_SERVO);
+  doorServo.write(DOOR_CLOSED);
+  delay(1000);
+  doorServo.detach();
+}
+
+void testLoop() {
+  while (1) {
+    waitForButtonPress(false);
+    testHopper();
+    calibratePosition();
+    openDoor();
+    bowlOut();
+    waitForButtonPress(true);
+    bowlIn();
+    closeDoor();
+  }
+}
+
+void testAll() {
+  colorOn(WHITE);
+
+  calibratePosition();
   openDoor();
-  delay(3000);
+  bowlOut();
+  bowlIn();
   closeDoor();
-  delay(3000);
-  openDoor();
+  lightsOff();
+}
+
+void waitForButtonPress(bool colors) {
+  if (colors)
+    colorOn(RED);
+
+  while (digitalRead(INPUT_BUTTON) == HIGH) {
+    delay(10);
+  }
+
+  blinkColor(GREEN);
 }
 
 void testMotionSensor() {
-  while(1) {
+  while (1) {
     int val = digitalRead(MOTION_SENSOR);
     if (val == HIGH) {
       colorOn(GREEN);
@@ -121,7 +183,13 @@ void blinkColor(int color) {
 
 void colorOn(int color) {
   lightsOff();
-  analogWrite(color, 255);
+  if (color == WHITE) {
+    analogWrite(RED, 255);
+    analogWrite(BLUE, 255);
+    analogWrite(GREEN, 255);
+  } else {
+    analogWrite(color, 255);
+  }
 }
 
 void lightsOff() {
@@ -130,43 +198,108 @@ void lightsOff() {
   analogWrite(GREEN, 0);
 }
 
-void vibrate() {
-  digitalWrite(VIBRATE_MOSFET, HIGH);
-  delay(VIBRATE_MS);
-  digitalWrite(VIBRATE_MOSFET, LOW);
+void setLights(int r, int g, int b) {
+  redValue = r;
+  greenValue = g;
+  blueValue = b;
+
+  analogWrite(RED, r);
+  analogWrite(GREEN, g);
+  analogWrite(BLUE, b);
+}
+
+void fadeToColor(int targetR, int targetG, int targetB) {
+  bool done = false;
+
+  int red = redValue;
+  int green = greenValue;
+  int blue = blueValue;
+
+  while (!done || digitalRead(INPUT_BUTTON) == LOW) {
+    if (redValue != targetR) {
+      red += ((targetR - redValue) / abs(targetR - redValue));
+    }
+    if (greenValue != targetG) {
+      green += ((targetG - greenValue) / abs(targetG - greenValue));
+    }
+    if (blueValue != targetB) {
+      blue += ((targetB - blueValue) / abs(targetB - blueValue));
+    }
+            delay(10);
+    setLights(red, green, blue);
+    done = (red == targetR) && (blue == targetB) && (green == targetG);
+  }
+}
+
+void testHopperCycles(int num) {
+  hopper.enableOutputs();
+  hopper.setSpeed(HOPPER_SPEED);
+  while (num > 0) {
+    hopper.runSpeed();
+    //Serial.println("h");
+    num--;
+    delay(1);
+  }
+  hopper.disableOutputs();
 }
 
 void testHopper() {
   colorOn(GREEN);
   hopper.enableOutputs();
+  hopper.setCurrentPosition(0);
   hopper.setSpeed(HOPPER_SPEED);
+  hopper.moveTo(10000);
+  vibrateOn();
 
   int val = digitalRead(INPUT_BUTTON);
   while (val == HIGH) {
     val = digitalRead(INPUT_BUTTON);
 
-    hopper.runSpeed();
+    hopper.run();
   }
- 
+  vibrateOff();
+
   hopper.setCurrentPosition(0);
   hopper.runToNewPosition(-200);
   hopper.disableOutputs();
   blinkColor(RED);
-  
+
 }
 
 void openDoor() {
   doorServo.attach(DOOR_SERVO);
+
+  float amount = DOOR_START_DP;
+
+  for (float pos = DOOR_CLOSED; pos >= DOOR_OPENED; pos -= amount) {
+    doorServo.write(pos);
+    delay(DOOR_DELAY_STEP);
+    amount += DOOR_ACCEL_AMOUNT;
+  }
   doorServo.write(DOOR_OPENED);
-  delay(700);
+  delay(200);
+
   doorServo.detach();
   isDoorOpen = true;
 }
 
 void closeDoor() {
+  if (isBowlOut) {
+    bowlIn();
+  }
   doorServo.attach(DOOR_SERVO);
+
+  float amount = DOOR_START_DP;
+
+  for (float pos = DOOR_OPENED; pos <= DOOR_CLOSED; pos += amount) {
+    doorServo.write(pos);
+    delay(DOOR_DELAY_STEP);
+    amount += DOOR_ACCEL_AMOUNT;
+  }
+
   doorServo.write(DOOR_CLOSED);
-  delay(700);
+  delay(200);
+
   doorServo.detach();
   isDoorOpen = false;
 }
@@ -182,10 +315,14 @@ void setStepperInSpeed() {
 }
 
 void bowlOut() {
+  if (!isDoorOpen) {
+    openDoor();
+  }
   stepper.enableOutputs();
   setStepperOutSpeed();
   stepper.runToNewPosition(OUT_POS);
   stepper.disableOutputs();
+  isBowlOut = true;
 }
 
 void bowlIn() {
@@ -194,12 +331,63 @@ void bowlIn() {
   stepper.runToNewPosition(IN_POS);
   stepper.runToNewPosition(CENTERED_POS);
   stepper.disableOutputs();
+  isBowlOut = false;
+}
+
+void vibrateOn() {
+  digitalWrite(VIBRATE_RELAY, HIGH);
+}
+
+void vibrateOff() {
+  digitalWrite(VIBRATE_RELAY, LOW);
+}
+
+void hopperAndMeasure(int targetWeight) {
+  hopper.enableOutputs();
+  hopper.setCurrentPosition(0);
+  hopper.setSpeed(HOPPER_SPEED);
+  hopper.moveTo(1000);
+
+  scale.tare();
+  delay(1000);
+
+  vibrateOn();
+
+  float weight = 0;
+  float speedDelay = 1.2;
+  bool done = false;
+  int lightMapped = 0;
+
+  digitalWrite(HOPPER_STEPPER_DIRECTION, HIGH);
+  while (!done) {
+    for (int i = 0; i < 40; i++) {
+      digitalWrite(HOPPER_STEPPER_STEP, HIGH);
+      delay(speedDelay);
+      digitalWrite(HOPPER_STEPPER_STEP, LOW);
+      delay(speedDelay);
+    }
+
+    weight = round(scale.get_units() * -1);
+    lightMapped = map(weight, 0, targetWeight, 0, 255);
+    setLights(lightMapped, lightMapped, lightMapped);
+
+    if (digitalRead(INPUT_BUTTON) == LOW || weight > targetWeight) {
+      done = true;
+    }
+  }
+  digitalWrite(HOPPER_STEPPER_DIRECTION, LOW);
+  vibrateOff();
+  lightsOff();
+
+  hopper.setCurrentPosition(0);
+  hopper.runToNewPosition(-200);
+  hopper.disableOutputs();
 }
 
 void calibratePosition() {
   stepper.enableOutputs();
   delay(200);
-  
+
   const int MAX_STEPS = 8000;
   const int STEP_PER_CYCLE = 10;
   digitalWrite(BOWL_STEPPER_DIRECTION, HIGH);
@@ -224,8 +412,91 @@ void calibratePosition() {
   stepper.disableOutputs();
 }
 
+void waitForMotion() {
+  bool detected = false;
+  while (!detected) {
+    if (digitalRead(MOTION_SENSOR) == HIGH || digitalRead(INPUT_BUTTON) == LOW) {
+      detected = true;
+    }
+    delay(100);
+  }
+}
+
+void waitForLackOfMotion() {
+  bool detected = true;
+  while (detected) {
+    if (digitalRead(MOTION_SENSOR) == LOW || digitalRead(INPUT_BUTTON) == LOW) {
+      detected = false;
+    }
+  }
+}
+
+void feedRoutine(int amount) {
+  calibratePosition();
+  bowlIn();
+  hopperAndMeasure(amount);
+  openDoor();
+  bowlOut();
+  fadeToColor(200, 200, 200);
+  delay(10 * 1000);
+  fadeToColor(0, 0, 0);
+  
+  delay((1000 * 60) * 5);
+  //fadeToColor(255, 0, 0);
+  //waitForMotion();
+  //fadeToColor(0, 255, 0);
+  //waitForLackOfMotion();
+  //fadeToColor(0,0,0);
+  bowlIn();
+  closeDoor();
+}
+
 void loop() {
-  // put your main code here, to run repeatedly:
-  //Serial.println(digitalRead(MOTION_SENSOR));
-  //delay(100);
+
+  delay(100);
+  if (Serial.available() > 0) {
+    command = Serial.readStringUntil('\n');
+  }
+  if (command.length() > 0) {
+
+    Serial.print("Command: ");
+    Serial.println(command);
+    StringSplitter *splitter = new StringSplitter(command, ':', 5);
+    String type = splitter->getItemAtIndex(0);
+    int itemCount = splitter->getItemCount();
+    //Serial.println("Item count: " + String(itemCount));
+
+    //---------
+    // FEED
+    //---------
+    if (type == "f") {
+      int amount = splitter->getItemAtIndex(1).toInt();
+      Serial.print("Feed ");
+      Serial.println(amount);
+      
+      feedRoutine(amount);
+    }
+
+    //---------
+    // LIGHT
+    //---------
+    if (type == "l") {
+      if (itemCount == 4) {
+        int r = splitter->getItemAtIndex(1).toInt();
+        int g = splitter->getItemAtIndex(2).toInt();
+        int b = splitter->getItemAtIndex(3).toInt();
+
+        fadeToColor(r, g, b);
+
+      }
+    }
+
+    //      for (int i = 0; i < itemCount; i++) {
+    //        String item = splitter->getItemAtIndex(i);
+    //        Serial.println("Item @ index " + String(i) + ": " + String(item));
+    //      }
+    command = "";
+
+  }
+
 }

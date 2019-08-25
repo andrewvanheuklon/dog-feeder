@@ -1,0 +1,23 @@
+{
+  "name": "dog-feeder",
+  "version": "1.0.0",
+  "description": "Node module for running dog feeder",
+  "main": "feeder-3-pi.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andrewvanheuklon/dog-feeder.git"
+  },
+  "author": "Andrew VanHeuklon",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/andrewvanheuklon/dog-feeder/issues"
+  },
+  "homepage": "https://github.com/andrewvanheuklon/dog-feeder#readme",
+  "dependencies": {
+    "node-schedule": "^1.3.2",
+    "serialport": "^7.1.5"
+  }
+}
