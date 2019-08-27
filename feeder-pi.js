@@ -80,6 +80,7 @@ model.setupPortConnection = function() {
         console.log("opened");
         model.isPortOpen = true;
         
+        //setTimeout(function() {model.dispenseFood(100) }, 2000);
     });
     
     model.port.on('close', function() {

@@ -62,6 +62,8 @@ AccelStepper stepper(AccelStepper::DRIVER, BOWL_STEPPER_STEP, BOWL_STEPPER_DIREC
 AccelStepper hopper(AccelStepper::DRIVER, HOPPER_STEPPER_STEP, HOPPER_STEPPER_DIRECTION);
 
 int pos = 200;
+unsigned long piCheckInMillis = millis();
+const long CHECK_IN_WARN_MS = 60000;
 
 void setup() {
   Serial.begin(9600);
@@ -147,15 +149,24 @@ void waitForButtonPress(bool colors) {
 }
 
 void testMotionSensor() {
-  while (1) {
-    int val = digitalRead(MOTION_SENSOR);
-    if (val == HIGH) {
-      colorOn(GREEN);
+  openDoor();
+  bowlOut();
+
+  while (digitalRead(INPUT_BUTTON) == HIGH) {
+
+    if (digitalRead(MOTION_SENSOR) == HIGH) {
+      toColor(0, 150, 0);
     } else {
-      colorOn(RED);
+      toColor(150, 0, 0);
     }
     delay(100);
   }
+
+  toColor(0, 0, 0);
+
+  bowlIn();
+  closeDoor();
+
 }
 
 void testColors() {
@@ -198,7 +209,7 @@ void lightsOff() {
   analogWrite(GREEN, 0);
 }
 
-void setLights(int r, int g, int b) {
+void toColor(int r, int g, int b) {
   redValue = r;
   greenValue = g;
   blueValue = b;
@@ -225,8 +236,8 @@ void fadeToColor(int targetR, int targetG, int targetB) {
     if (blueValue != targetB) {
       blue += ((targetB - blueValue) / abs(targetB - blueValue));
     }
-            delay(10);
-    setLights(red, green, blue);
+    delay(10);
+    toColor(red, green, blue);
     done = (red == targetR) && (blue == targetB) && (green == targetG);
   }
 }
@@ -358,18 +369,27 @@ void hopperAndMeasure(int targetWeight) {
   bool done = false;
   int lightMapped = 0;
 
-  digitalWrite(HOPPER_STEPPER_DIRECTION, HIGH);
+
   while (!done) {
-    for (int i = 0; i < 40; i++) {
+    digitalWrite(HOPPER_STEPPER_DIRECTION, HIGH);
+    for (int i = 0; i < 300; i++) {
       digitalWrite(HOPPER_STEPPER_STEP, HIGH);
       delay(speedDelay);
       digitalWrite(HOPPER_STEPPER_STEP, LOW);
       delay(speedDelay);
     }
+    // Back up a little to avoid jams
+    digitalWrite(HOPPER_STEPPER_DIRECTION, LOW);
+    for (int i = 0; i < 80; i++) {
+      digitalWrite(HOPPER_STEPPER_STEP, HIGH);
+      delay(1);
+      digitalWrite(HOPPER_STEPPER_STEP, LOW);
+      delay(1);
+    }
 
-    weight = round(scale.get_units() * -1);
+    weight = round(scale.get_units(2) * -1);
     lightMapped = map(weight, 0, targetWeight, 0, 255);
-    setLights(lightMapped, lightMapped, lightMapped);
+    toColor(lightMapped, lightMapped, lightMapped);
 
     if (digitalRead(INPUT_BUTTON) == LOW || weight > targetWeight) {
       done = true;
@@ -380,7 +400,7 @@ void hopperAndMeasure(int targetWeight) {
   lightsOff();
 
   hopper.setCurrentPosition(0);
-  hopper.runToNewPosition(-200);
+  hopper.runToNewPosition(-250);
   hopper.disableOutputs();
 }
 
@@ -424,10 +444,26 @@ void waitForMotion() {
 
 void waitForLackOfMotion() {
   bool detected = true;
+  const int retries = 5;
+  const int delayMs = 2000;
+  int curTry = 0;
+
   while (detected) {
-    if (digitalRead(MOTION_SENSOR) == LOW || digitalRead(INPUT_BUTTON) == LOW) {
+    if (digitalRead(MOTION_SENSOR) == LOW) {
+      curTry++;
+      if (curTry >= retries) {
+        detected = false;
+      } else {
+        delay(delayMs);
+      }
+    } else {
+      //Start over if motion detected
+      curTry = 0;
+    }
+    if (digitalRead(INPUT_BUTTON) == LOW) {
       detected = false;
     }
+    delay(100);
   }
 }
 
@@ -435,25 +471,43 @@ void feedRoutine(int amount) {
   calibratePosition();
   bowlIn();
   hopperAndMeasure(amount);
+  toColor(250, 250, 250);
   openDoor();
   bowlOut();
-  fadeToColor(200, 200, 200);
-  delay(10 * 1000);
+  waitForMotion();
+  fadeToColor(150, 150, 150);
+  delay(1000);
+  waitForLackOfMotion();
   fadeToColor(0, 0, 0);
-  
-  delay((1000 * 60) * 5);
-  //fadeToColor(255, 0, 0);
-  //waitForMotion();
-  //fadeToColor(0, 255, 0);
-  //waitForLackOfMotion();
-  //fadeToColor(0,0,0);
   bowlIn();
   closeDoor();
+}
+
+void handleActionButton() {
+  if (isBowlOut) {
+    bowlIn();
+    closeDoor();
+  } else {
+    openDoor();
+    bowlOut();
+  }
 }
 
 void loop() {
 
   delay(100);
+
+  //Blink Red if the pi service has not checked in with the arduino
+  if (millis() - piCheckInMillis > CHECK_IN_WARN_MS) {
+    toColor(0, 0, 0);
+    fadeToColor(255, 0, 0);
+    fadeToColor(0, 0, 0);
+    piCheckInMillis = millis();
+  }
+  
+  if (digitalRead(INPUT_BUTTON) == LOW) {
+    handleActionButton();
+  }
   if (Serial.available() > 0) {
     command = Serial.readStringUntil('\n');
   }
@@ -466,6 +520,17 @@ void loop() {
     int itemCount = splitter->getItemCount();
     //Serial.println("Item count: " + String(itemCount));
 
+    if (type == "h") {
+      //Hello from the Pi.
+      fadeToColor(0, 0, 255);
+      delay(1000);
+      fadeToColor(0, 0, 0);
+    }
+    if (type == "c") {
+      //Checkin from the pi
+      piCheckInMillis = millis();
+    }
+
     //---------
     // FEED
     //---------
@@ -473,7 +538,7 @@ void loop() {
       int amount = splitter->getItemAtIndex(1).toInt();
       Serial.print("Feed ");
       Serial.println(amount);
-      
+
       feedRoutine(amount);
     }
 
@@ -491,10 +556,25 @@ void loop() {
       }
     }
 
-    //      for (int i = 0; i < itemCount; i++) {
-    //        String item = splitter->getItemAtIndex(i);
-    //        Serial.println("Item @ index " + String(i) + ": " + String(item));
-    //      }
+    if (type == "m") {
+      testMotionSensor();
+    } else if (type == "b") {
+      String val = splitter->getItemAtIndex(1);
+      if (val == "1") {
+        bowlOut();
+      }
+      else if (val == "0") {
+        bowlIn();
+      }
+    }
+    if (type == "d") {
+      String val = splitter->getItemAtIndex(1);
+      if (val == "1") {
+        openDoor();
+      } else if (val == "0") {
+        closeDoor();
+      }
+    }
     command = "";
 
   }
